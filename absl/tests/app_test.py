@@ -17,8 +17,10 @@
 import contextlib
 import copy
 import enum
+import importlib
 import io
 import os
+import pdb
 import re
 import subprocess
 import sys
@@ -116,6 +118,71 @@ class UnitTests(absltest.TestCase):
   def test_register_and_parse_flags_with_usage_exits_on_second_run(self):
     with self.assertRaises(SystemError):
       app._register_and_parse_flags_with_usage()
+
+  def test_python_breakpoint(self):
+    class MyDebuggerModule:
+      """Imitates some aspects of the `pdb` interface."""
+
+      def post_mortem(self):
+        pass
+
+      def runcall(self, *args, **kwargs):
+        del args, kwargs
+
+    class IncompleteDebuggerModule:
+
+      def post_mortem(self):
+        pass
+
+    importlib_import_module = importlib.import_module
+
+    def my_import_module(module: str, *args, **kwargs):
+      if module == 'my.debugger':
+        return MyDebuggerModule()
+      if module == 'incomplete.debugger':
+        return IncompleteDebuggerModule()
+      return importlib_import_module(module, *args, **kwargs)
+
+    new_env = dict(os.environ)
+    try:
+      del new_env['PYTHONBREAKPOINT']
+    except KeyError:
+      pass
+
+    with mock.patch.object(os, 'environ', new=new_env):
+      for testcase_name, env_value in (
+          ('no_variable', None),
+          ('empty_variable', ''),
+          ('unimportable_module', 'unimportable.module.set_trace'),
+      ):
+        if env_value is not None:
+          new_env['PYTHONBREAKPOINT'] = env_value
+        with self.subTest(testcase_name):
+          self.assertIs(app._debugger_with('runcall'), pdb)
+          self.assertIs(app._debugger_with('post_mortem'), pdb)
+
+      with mock.patch.object(importlib, 'import_module', new=my_import_module):
+        new_env['PYTHONBREAKPOINT'] = 'my.debugger.set_trace'
+        with self.subTest('my_debugger'):
+          debugger_with_runcall = app._debugger_with('runcall')
+          self.assertIsInstance(debugger_with_runcall, MyDebuggerModule)
+          self.assertTrue(hasattr(debugger_with_runcall, 'runcall'))
+
+          debugger_with_post_mortem = app._debugger_with('post_mortem')
+          self.assertIsInstance(debugger_with_post_mortem, MyDebuggerModule)
+          self.assertTrue(hasattr(debugger_with_post_mortem, 'post_mortem'))
+
+        new_env['PYTHONBREAKPOINT'] = 'incomplete.debugger.set_trace'
+        with self.subTest('incomplete_debugger'):
+          debugger_with_runcall = app._debugger_with('runcall')
+          self.assertIs(debugger_with_runcall, pdb)
+          self.assertTrue(hasattr(debugger_with_runcall, 'runcall'))
+
+          debugger_with_post_mortem = app._debugger_with('post_mortem')
+          self.assertIsInstance(
+              debugger_with_post_mortem, IncompleteDebuggerModule
+          )
+          self.assertTrue(hasattr(debugger_with_post_mortem, 'post_mortem'))
 
 
 class FunctionalTests(absltest.TestCase):
